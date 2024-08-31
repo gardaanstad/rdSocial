@@ -1,180 +1,187 @@
 from typing import *
 from nltk.tokenize import word_tokenize
+from collections import Counter
 from user import User
 from post import Post
+from invertedindex import InvertedIndex
 
 class System:
     def __init__(self):
-        self.__users: list[User] = []
-        self.__user_handles: set[str] = set()
-        
-        self.__posts: list[Post] = []
-        
-        self.__index: dict[str, list[Post]] = {}
+        self.__users: dict[str, User] = {} # {handle: User instance, ...}
+        self.__posts: dict[int, Post] = {} # {id: post, ...}
+        self.__index: InvertedIndex = InvertedIndex() # {word: [post, ...], ...}
     
-    def __index_post(self, post: Post):
-        content = word_tokenize(post.normalized_content(), language="norwegian")
-        
-        for word in content:
-            if word not in self.__index:
-                self.__index[word] = [post]
-                continue
-            self.__index[word].append(post)
-    
-    def __add_user(self, user: User) -> User:
-        """
-        Internal method for adding a user to the system. 
-        Returns user if user was added or already exists.
-        Raises ValueError if user handle already exists in system, but user instance is different.
-        """
-        
-        if user in self.__users:
-            return user
-        
-        if user.handle() in self.__user_handles:
-            raise ValueError("User handle already exists in system")
-        
-        self.__user_handles.add(user.handle())
-        self.__users.append(user)
-        return user
-    
-    def __add_post(self, post: Post) -> int:
-        """
-        Adds a post to the system, inverse indexes it, and returns the index of the post in the system's self.__posts list.
-        """
-        
-        self.__posts.append(post)
-        self.__add_user(post.user())
-        self.__index_post(post)
-        
-        return len(self.__posts) - 1
-    
-    def add_post(self, post: Post) -> int:
-        """
-        Adds a post to the system, inverse indexes it, and returns the index of the post in the system's self.__posts list.
-        """
-        
-        return self.__add_post(post)
-    
-    def process_posts(self, posts: Iterable[Post]) -> None:
-        """
-        Processes a list of posts, adding them to the system and inverse indexing them.
-        """
-        
-        posts = iter(posts)
-        post = next(posts, None)
-        
-        while post:            
-            post_index = self.__add_post(post)
-            
-            post.user().add_post(post_index)
-            
-            post = next(posts, None)
-    
-    def process_post(self, post: Post) -> None:
-        """
-        Processes a post, adding it to the system and inverse indexing it.
-        """
-        
-        post_index = self.__add_post(post)
-        post.user().add_post(post_index)
-    
-    def delete_post(self, post_index: int) -> None:
-        """
-        Deletes a post from the system.
-        """
-        
-        self.__posts.pop(post_index)
-    
-    def add_user(self, user: User) -> User:
-        """
-        Adds a user to the system.
-        """
-        
-        return self.__add_user(user)
-    
-    def __keyword_search(self, keyword: str) -> list[Post]:
-        keyword = self.__normalize(keyword)
-        return self.__index.get(keyword, [])
+    def get_post(self, post_id: int) -> Post:
+        return self.__posts.get(post_id, None)
     
     def __normalize(self, buffer: str) -> str:
         return buffer.casefold()
     
     def __tokenize(self, buffer: str) -> list[str]:
-        return word_tokenize(self.__normalize(buffer), language="norwegian")
+        return word_tokenize(self.__normalize(buffer))
     
-    def search(self, query: str, top_k: int = None, include_index: bool = False) -> list[Post]:
-        assert isinstance(query, str), "Sentence must be a string"
+    def __process_post(self, post: Post) -> None:
+        """
+        Processes a post by adding it to the system and inverse indexing it.
+        """
+        
+        assert isinstance(post, Post), "Post must be a Post"
+        assert post.id() not in self.__posts, "Post ID already exists"
+        
+        self.__posts[post.id()] = post
+        self.__index.index_post(post)
+        self.add_user(post.user_handle())
+    
+    def add_post(self, content: str, user: User) -> int:
+        """
+        Adds a post to the system. Returns the post's ID.
+        """
+        
+        new_post = Post(len(self.__posts), user, content) # id, user, content
+        self.__process_post(new_post)
+        user.add_post(new_post.id())
+        
+        return new_post.id()
+    
+    def delete_post(self, post_id: int) -> None:
+        """
+        Deletes a post from the system.
+        """
+        
+        post = self.__posts.get(post_id, None)
+        assert post is not None, "Post not found"
+        
+        user = self.__users.get(post.user_handle(), None)
+        assert user is not None, "User not found"
+        
+        del self.__posts[post_id]
+        user.remove_post(post_id)
+    
+    def search(self, query: str, top_k: int = None) -> list[Post]:
+        """
+        Returns a list of posts that match the given query.
+        """
+        
+        return self.__index.search(query, top_k)
+    
+    def __user_keyword_search(self, keyword: str) -> list[User]:
+        """
+        Internal helper method to search for users by keyword.
+        
+        Returns a list of User instances which contain the keyword in their name.
+        """
+        
+        keyword = self.__normalize(keyword)
+        return [user for user in self.__users.values() if self.__normalize(user.name()) == keyword]
+    
+    def search_users(self, query: str, top_k: int = None) -> list[User]:
+        """
+        Returns a list of users' names that match the given query.
+        """
+        
+        assert isinstance(query, str), "Query must be a string"
         
         keywords = self.__tokenize(query)
-        keyword_sets = [set(self.__keyword_search(keyword)) for keyword in keywords]
-        all_posts = set.union(*keyword_sets)
-        
-        from collections import Counter
+        keyword_sets = [set(self.__user_keyword_search(keyword)) for keyword in keywords]
+        all_users = list(set.union(*keyword_sets)) # all users that contain one or more of the keywords
 
-        scored_posts: Counter[Post, int] = Counter()
-        for post in all_posts:
-            for keyword in keywords:
-                if keyword in post.normalized_content():
-                    scored_posts[post] += 1
-        
-        results = [post for post, _ in scored_posts.most_common(top_k)]
-        return (results, [self.__posts.index(post) for post in results]) if include_index else results
+        scored_users: Counter[User, int] = Counter()
+        for user in all_users:
+            user_keywords = self.__tokenize(user.name())
+            
+            for user_keyword in user_keywords:
+                if user_keyword in keywords:
+                    scored_users[user] += 1
+
+        scored_users = scored_users.most_common(top_k)
+        results = [user for (user, _) in scored_users]
+
+        return results
     
-    def __user_by_name(self, name: str, default = None, include_index = False) -> Optional[Union[User, Tuple[User, int]]]:
-        name = self.__normalize(name)
-        
-        i: int
-        user: User
-        
-        for i, user in enumerate(self.__users):
-            if self.__normalize(user.name()) == name:
-                return (user, i) if include_index else user
-        return default
-    
-    def __user_by_handle(self, handle: str, default = None, include_index = False) -> Optional[Union[User, Tuple[User, int]]]:
+    def add_user(self, handle: str, name: str = None) -> User:
+        """
+        Adds a user to the system and returns it. If the user already exists, it returns the existing user.
+        """
         handle = self.__normalize(handle)
         
-        i: int
-        user: User
+        if handle in self.__users:
+            return self.__users[handle]
         
-        for i, user in enumerate(self.__users):
-            if self.__normalize(user.handle()) == handle:
-                return (user, i) if include_index else user
+        if name is None:
+            raise ValueError("User must have a name")
+        
+        new_user = User(handle, name)
+        self.__users[handle] = new_user
+        return new_user
+    
+    def __user_by_name(self, name: str, default = None) -> Optional[User]:
+        """
+        Returns a User instance if it finds a user with the given name in the system.
+        Returns None if no user is found.
+        """
+        user: User
+        for user in self.__users.values():
+            if self.__normalize(user.name()) == name:
+                return user
         return default
     
-    def user_by_name(self, name: str) -> Optional[User]:
-        return self.__user_by_name(name, default=None, include_index=False)
+    def __user_by_handle(self, handle: str, default = None) -> Optional[User]:
+        """
+        Returns a User instance if it finds a user with the given handle in the system.
+        Returns None if no user is found.
+        """
+        return self.__users.get(handle, default)
     
-    def user_by_handle(self, handle: str) -> Optional[User]:
-        return self.__user_by_handle(handle, default=None, include_index=False)
+    def user(self, query: str) -> Optional[User]:
+        """
+        Attempts to return a User instance with the given handle.
+        If no user is found, attempts to return a User instance with the given name.
+        Returns None if no user is found.
+        """
         
-    def posts_by_user(self, query_user: str) -> list[Post]:
-        user = self.__user_by_name(query_user)
-        if user is None:
-            return []
+        query = self.__normalize(query)
+        
+        if query not in self.__users: # if handle not in system, search by name
+            return self.__user_by_name(query)
+        
+        return self.__user_by_handle(query) # if handle in system, return user
+        
+    def posts_by_user(self, user: User) -> list[Post]:
+        """
+        Returns a list of posts from the given user.
+        """
+        
+        assert isinstance(user, User), "User must be a User"
 
-        return [self.__posts[i] for i in user.posts()]
+        return [self.__posts[id] for id in user.posts()] # list of Post instances
     
-    def posts_by_following(self, query_user: str) -> list[Post]:
-        user = self.__user_by_name(query_user)
-        if user is None:
+    def posts_by_following(self, user: User) -> list[Post]:
+        """
+        Returns a list of posts from users that the given user follows.
+        """
+        
+        assert isinstance(user, User), "User must be a User"
+        
+        if len(user.following()) == 0:
             return []
         
         posts = []
-        for follower in user.followers():
-            posts.extend([self.__posts[i] for i in self.__users[follower].posts()])
+        for following_handle in user.following():
+            following = self.__user_by_handle(following_handle)
+            assert isinstance(following, User), f"Couldn't find user that @{user.handle()} is following with handle: @{following_handle}"
+            
+            posts.extend(self.posts_by_user(following))
         
         return posts
     
-    def follow_by_handle(self, follower: str, followee: str) -> None:
+    def follow(self, follower_handle: str, followee_handle: str) -> None:
         """
-        First user follows second user by adding the second user's self.__users index to the first user's following and 
-        the first user's index to the second user's followers.
+        First user follows second user by adding the second user's handle to the first user's following and 
+        the first user's handle to the second user's followers.
         """
         
-        follower, follower_index = self.__user_by_handle(follower, include_index=True)
-        followee, followee_index = self.__user_by_handle(followee, include_index=True)
+        follower = self.__user_by_handle(follower_handle)
+        followee = self.__user_by_handle(followee_handle)
 
         assert follower is not None, "User that's following not found"
         assert followee is not None, "User to be followed not found"
@@ -182,17 +189,86 @@ class System:
         follower: User
         followee: User
         
-        follower.add_following(followee_index)
-        followee.add_follower(follower_index)
-        
-    def user_followers(self, user: str) -> list[User]:
-        user: User = self.__user_by_name(user)
-        if user is None:
-            return []
-        return [self.__users[i] for i in user.followers()]
+        follower.add_following(followee.handle())
+        followee.add_follower(follower.handle())
     
-    def user_following(self, user: str) -> list[User]:
-        user: User = self.__user_by_name(user)
-        if user is None:
-            return []
-        return [self.__users[i] for i in user.following()]
+    def unfollow(self, follower_handle: str, followee_handle: str) -> None:
+        """
+        First user unfollows second user by removing the second user's handle from the first user's following and 
+        the first user's handle from the second user's followers.
+        """
+        
+        follower = self.__user_by_handle(follower_handle)
+        followee = self.__user_by_handle(followee_handle)
+        
+        assert follower is not None, "User that's following not found"
+        assert followee is not None, "User to be unfollowed not found"
+        
+        follower: User
+        followee: User
+        
+        follower.remove_following(followee.handle())
+        followee.remove_follower(follower.handle())
+    
+    def delete_user(self, user_handle: str) -> None:
+        """
+        Deletes a user and all their posts from the system.
+        """
+        
+        user = self.user_by_handle(user_handle)
+        assert user is not None, "User not found"
+        
+        for post_id in user.posts():
+            del self.__posts[post_id]
+        
+        del self.__users[user.handle()]
+    
+    def delete_post(self, post_id: int) -> None:
+        """
+        Deletes a post from the system.
+        """
+        
+        post = self.__posts.get(post_id, None)
+        assert post is not None, "Post not found"
+        
+        user = self.__users.get(post.user_handle(), None)
+        assert user is not None, "Post's user not found"
+        
+        user.remove_post(post_id)
+        del self.__posts[post_id]
+    
+    @staticmethod
+    def process_users(system: "System", users: list[(str, str)]) -> "System":
+        """
+        Processes a list of users by adding them to the system.
+        Returns the system.
+        """
+        for handle, name in users:
+            system.add_user(handle, name)
+        
+        return system
+    
+    @staticmethod
+    def process_posts(system: "System", posts: list[tuple[str, User]]) -> "System":
+        """
+        Processes a list of posts by adding them to the system.
+        Returns the system.
+        """
+        for post in posts:
+            system.add_post(post[0], post[1])
+        
+        return system
+    
+    @staticmethod
+    def process_follows(system: "System", follows: list[tuple[User, User]]) -> "System":
+        """
+        Processes a list of follows by adding them to the system. 
+        
+        The parameter 'follows' is a list of tuples [(User that's following, User that's being followed), ...].
+        
+        Returns the system.
+        """
+        for follow in follows:
+            system.follow(follow[0].handle(), follow[1].handle())
+        
+        return system
